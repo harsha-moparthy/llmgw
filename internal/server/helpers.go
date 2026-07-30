@@ -82,10 +82,31 @@ func (s *Server) recordRequestMetric(tenant, model string, status int, start tim
 	if s.deps.Metrics == nil {
 		return
 	}
+	model = s.safeModelLabel(model)
 	s.deps.Metrics.Requests.With(metrics.Labels{
 		"tenant": tenant, "model": model, "status": metrics.StatusClass(status),
 	}).Inc()
 	metrics.ObserveSeconds(s.deps.Metrics.RequestLatency.With(metrics.Labels{"model": model}), s.now().Sub(start))
+}
+
+// safeModelLabel collapses a model name that is not a configured route into a
+// single constant.
+//
+// The `model` field comes from the request body, and a metric label is a
+// permanently retained series. Without this, any authenticated tenant could mint
+// unbounded series — and therefore unbounded memory — by sending a fresh random
+// model name per request, which is a denial of service with a 404 as its only
+// visible symptom. Cardinality is bounded by configuration, which is the rule the
+// metrics package documents for itself; this is the one place client input
+// reached a label and it needed enforcing here rather than trusted at call sites.
+func (s *Server) safeModelLabel(model string) string {
+	if model == "" {
+		return ""
+	}
+	if _, ok := s.deps.Config.Routes[model]; ok {
+		return model
+	}
+	return "unknown"
 }
 
 func (s *Server) recordAttemptMetrics(o router.AttemptOutcome) {

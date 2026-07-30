@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,5 +306,44 @@ func TestChunkForwardableCoversNonTextPayloads(t *testing.T) {
 					"client silently loses this part of the response", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestUnknownModelDoesNotLeakMetricSeries pins a denial-of-service found by
+// audit. The `model` field comes from the request body and was used verbatim as a
+// metric label, and a label is a permanently retained series — so any
+// authenticated tenant could exhaust memory by sending a fresh random model name
+// per request, with a 404 as the only visible symptom.
+func TestUnknownModelDoesNotLeakMetricSeries(t *testing.T) {
+	h := newHarness(t, 1, []config.Tenant{benchTenant()})
+
+	const attempts = 200
+	for i := 0; i < attempts; i++ {
+		body := chatBody(fmt.Sprintf("evil-model-%d", i), "leak a series", false)
+		resp := h.post("bench-key", body)
+		if resp.StatusCode != 404 {
+			t.Fatalf("expected 404 for an unconfigured model, got %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Every one of those requests must collapse into ONE series, not 200.
+	out := h.server.deps.Metrics.Registry().String()
+	leaked := strings.Count(out, "evil-model-")
+	if leaked > 0 {
+		t.Errorf("%d client-supplied model names reached metric labels; each is a "+
+			"permanently retained series, so this is an unbounded memory leak "+
+			"reachable from a request body", leaked)
+	}
+	if !strings.Contains(out, `model="unknown"`) {
+		t.Errorf("unconfigured models should collapse to model=\"unknown\"; got:\n%s", out)
+	}
+
+	// A configured route must still be labelled by its real name, or the fix
+	// would have destroyed the metric's usefulness.
+	r := h.post("bench-key", chatBody("gw-chat", "legitimate", false))
+	r.Body.Close()
+	if !strings.Contains(h.server.deps.Metrics.Registry().String(), `model="gw-chat"`) {
+		t.Error("a configured route lost its model label")
 	}
 }

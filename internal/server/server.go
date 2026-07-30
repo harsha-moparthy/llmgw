@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -93,9 +94,39 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
 	if s.deps.Metrics != nil {
-		mux.Handle("/metrics", s.deps.Metrics.Registry())
+		// /metrics carries per-tenant spend, token volume and remaining budget —
+		// one tenant's commercial data. Prometheus endpoints are conventionally
+		// left open because they conventionally carry nothing sensitive; this one
+		// does, so it is gated behind the operator token when one is configured.
+		//
+		// The default is deliberately open, because the alternative — refusing to
+		// serve metrics unless a token is set — silently breaks every existing
+		// scrape config on upgrade. Instead the gap is stated in the README and
+		// the config field is right there. A deployment that exposes this port
+		// beyond its monitoring network should set it.
+		mux.Handle("/metrics", s.requireOperator(s.deps.Metrics.Registry()))
 	}
 	return mux
+}
+
+// requireOperator gates a handler behind the operator token from
+// LLMGW_OPERATOR_TOKEN, if one is set. With no token configured the handler is
+// served openly and a warning is logged once at startup.
+func (s *Server) requireOperator(h http.Handler) http.Handler {
+	token := os.Getenv("LLMGW_OPERATOR_TOKEN")
+	if token == "" {
+		return h
+	}
+	want := config.HashKey(token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented := r.Header.Get("Authorization")
+		presented = strings.TrimPrefix(presented, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(config.HashKey(strings.TrimSpace(presented))), []byte(want)) != 1 {
+			writeError(w, http.StatusUnauthorized, apiv1.ErrTypeAuth, "", "operator token required")
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // recover wraps a handler so a panic returns a 500 and is logged with its stack,
