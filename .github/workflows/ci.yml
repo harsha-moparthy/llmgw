@@ -12,12 +12,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           check-latest: true
+          # This project has zero external dependencies, so there is no go.sum
+          # and nothing to cache. Leaving the cache on makes every run log a
+          # spurious "Dependencies file is not found" warning for a file that
+          # correctly does not exist.
+          cache: false
 
       - name: format
         run: |
