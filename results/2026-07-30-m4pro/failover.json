@@ -1,0 +1,41 @@
+{
+  "mode": "failover",
+  "label": "Apple M4 Pro, primary killed at t=3s",
+  "started_at": "2026-07-30T07:59:46Z",
+  "finished_at": "2026-07-30T07:59:56Z",
+  "host": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cores": 14,
+    "mem_gb": 48,
+    "go_version": "1.26.5",
+    "machine": "Mac16,7"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:8080",
+    "admin": "http://127.0.0.1:9091",
+    "model": "gw-chat",
+    "n": 2000,
+    "concurrency": 16,
+    "max_tokens": 32,
+    "warmup": 200,
+    "ledger_path": "data/ledger.jsonl",
+    "provider_log_path": "data/requests.jsonl",
+    "kill_after": 3000000000,
+    "duration": 10000000000,
+    "label": "Apple M4 Pro, primary killed at t=3s"
+  },
+  "failover": {
+    "total_requests": 198269,
+    "succeeded": 198269,
+    "failed": 0,
+    "failed_during_kill_window": 0,
+    "killed_at": "2026-07-30T07:59:49.25025Z",
+    "detection_ms": 0,
+    "recovery_ms": 0,
+    "failover_window_ms": 0,
+    "requests_that_failed_over": 17,
+    "method_note": "Load held constant while the primary provider is killed via the mock's admin endpoint. detection_ms = kill to first client-visible failure. recovery_ms = kill to the last failure (after which the gateway serves from the secondary continuously). failover_window_ms = the span during which any client saw an error. A run with zero failures means the breaker absorbed the outage entirely and the window is 0."
+  }
+}

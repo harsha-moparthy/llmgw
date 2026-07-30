@@ -1,0 +1,86 @@
+{
+  "mode": "overhead",
+  "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback",
+  "started_at": "2026-07-30T07:59:16Z",
+  "finished_at": "2026-07-30T07:59:16Z",
+  "host": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cores": 14,
+    "mem_gb": 48,
+    "go_version": "1.26.5",
+    "machine": "Mac16,7"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:8080",
+    "admin": "http://127.0.0.1:9090",
+    "model": "gw-chat",
+    "n": 5000,
+    "concurrency": 32,
+    "max_tokens": 32,
+    "warmup": 200,
+    "ledger_path": "data/ledger.jsonl",
+    "provider_log_path": "data/requests.jsonl",
+    "kill_after": 3000000000,
+    "duration": 12000000000,
+    "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback"
+  },
+  "overhead": {
+    "requests": 5000,
+    "errors": 0,
+    "error_rate": 0,
+    "throughput_rps": 18509.826372608855,
+    "wall_seconds": 0.270126791,
+    "self_reported_overhead": {
+      "count": 5000,
+      "min": 15,
+      "mean": 365.5386,
+      "p50": 127,
+      "p90": 1015,
+      "p95": 1293,
+      "p99": 1875,
+      "p999": 2850,
+      "max": 3418,
+      "unit": "us"
+    },
+    "subtractive_overhead": {
+      "count": 5000,
+      "min": 115,
+      "mean": 1005.2454,
+      "p50": 847,
+      "p90": 1898,
+      "p95": 2272,
+      "p99": 3352,
+      "p999": 5379,
+      "max": 5835,
+      "unit": "us"
+    },
+    "end_to_end": {
+      "count": 5000,
+      "min": 285,
+      "mean": 1695.9504,
+      "p50": 1536,
+      "p90": 2823,
+      "p95": 3291,
+      "p99": 4735,
+      "p999": 9053,
+      "max": 9685,
+      "unit": "us"
+    },
+    "upstream_time": {
+      "count": 5000,
+      "min": 104,
+      "mean": 690.705,
+      "p50": 513,
+      "p90": 1417,
+      "p95": 1715,
+      "p99": 2570,
+      "p999": 4085,
+      "max": 4347,
+      "unit": "us"
+    },
+    "method_note": "self_reported = gateway's own timer for everything but the upstream round trip (X-LLMGW-Overhead-Us). subtractive = client-observed total minus the gateway's reported upstream time, so it also contains loopback and client cost and is an upper bound. Exact order statistics over the full sample; 200 warmup requests excluded.",
+    "bracket_note_p99": "p99 overhead is bracketed by [1875us self-reported, 3352us subtractive]; the 1477us gap is loopback + client + in-process time the gateway cannot see."
+  }
+}

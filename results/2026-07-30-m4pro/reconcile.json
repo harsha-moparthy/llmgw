@@ -1,0 +1,56 @@
+{
+  "mode": "reconcile",
+  "label": "post-failover, both provider logs",
+  "started_at": "2026-07-30T07:59:56Z",
+  "finished_at": "2026-07-30T07:59:57Z",
+  "host": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cores": 14,
+    "mem_gb": 48,
+    "go_version": "1.26.5",
+    "machine": "Mac16,7"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:8080",
+    "admin": "http://127.0.0.1:9090",
+    "model": "gw-chat",
+    "n": 2000,
+    "concurrency": 32,
+    "max_tokens": 32,
+    "warmup": 200,
+    "ledger_path": "data/ledger.jsonl",
+    "provider_log_path": "data/requests.jsonl,data/requests-secondary.jsonl",
+    "kill_after": 3000000000,
+    "duration": 12000000000,
+    "label": "post-failover, both provider logs"
+  },
+  "reconcile": {
+    "ledger_rows": 204602,
+    "provider_rows": 204185,
+    "matched": 204175,
+    "token_mismatches": 10,
+    "cost_mismatches": 10,
+    "missing_in_ledger": 0,
+    "missing_in_provider": 0,
+    "estimated_usage_rows": 0,
+    "estimated_mismatches": 10,
+    "settled_mismatches": 0,
+    "exact": false,
+    "exact_among_settled": true,
+    "mismatch_examples": [
+      "gw-4dum#1: prompt_tokens: ledger=38 upstream=37 delta=+1, completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.0000249 upstream=$0.00003435 delta=-9450000 pico (-$0.00000945)",
+      "gw-4dun#1: completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.00002475 upstream=$0.00003435 delta=-9600000 pico (-$0.0000096)",
+      "gw-4duo#1: prompt_tokens: ledger=38 upstream=37 delta=+1, completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.0000249 upstream=$0.00003435 delta=-9450000 pico (-$0.00000945)",
+      "gw-4dut#1: completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.00002475 upstream=$0.00003435 delta=-9600000 pico (-$0.0000096)",
+      "gw-4dup#1: completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.00002475 upstream=$0.00003435 delta=-9600000 pico (-$0.0000096)",
+      "gw-4duw#1: prompt_tokens: ledger=38 upstream=37 delta=+1, completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.0000249 upstream=$0.00003435 delta=-9450000 pico (-$0.00000945)",
+      "gw-4dur#1: completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.00002475 upstream=$0.00003435 delta=-9600000 pico (-$0.0000096)",
+      "gw-4dus#1: prompt_tokens: ledger=38 upstream=37 delta=+1, completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.0000249 upstream=$0.00003435 delta=-9450000 pico (-$0.00000945)",
+      "gw-4dux#1: completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.00002475 upstream=$0.00003435 delta=-9600000 pico (-$0.0000096)",
+      "gw-4duv#1: completion_tokens: ledger=32 upstream=48 delta=-16, cost_pico: ledger=$0.00002475 upstream=$0.00003435 delta=-9600000 pico (-$0.0000096)"
+    ],
+    "method_note": "Delegates to ledger.Reconcile, the same comparator the gateway's own tests use. The gateway ledger and the mock provider's log are produced by independent code paths with independent price tables; agreement is therefore evidence, not a tautology. Matching is on (request id, attempt). No tolerance: a single token or picodollar of disagreement is a mismatch. Multiple provider logs (a failover run spreads records across providers) are merged before comparison."
+  }
+}

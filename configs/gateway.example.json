@@ -1,0 +1,158 @@
+{
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "read_timeout": "15s",
+    "write_timeout": "0s",
+    "idle_timeout": "2m0s",
+    "shutdown_grace": "20s",
+    "max_request_bytes": 1048576,
+    "request_deadline": "1m0s"
+  },
+  "providers": [
+    {
+      "name": "mock-primary",
+      "vendor": "mock",
+      "base_url": "http://127.0.0.1:9001",
+      "api_key_env": "",
+      "connect_timeout": "0s",
+      "response_header_timeout": "30s",
+      "max_idle_conns_per_host": 64,
+      "breaker": {
+        "window_size": 20,
+        "min_samples": 5,
+        "failure_ratio": 0.5,
+        "cooldown": "2s",
+        "max_cooldown": "30s",
+        "half_open_probes": 2
+      },
+      "probe": {
+        "enabled": true,
+        "interval": "5s",
+        "timeout": "2s",
+        "path": "/admin/health"
+      }
+    },
+    {
+      "name": "mock-secondary",
+      "vendor": "mock",
+      "base_url": "http://127.0.0.1:9002",
+      "api_key_env": "",
+      "connect_timeout": "0s",
+      "response_header_timeout": "30s",
+      "max_idle_conns_per_host": 64,
+      "breaker": {
+        "window_size": 20,
+        "min_samples": 5,
+        "failure_ratio": 0.5,
+        "cooldown": "2s",
+        "max_cooldown": "30s",
+        "half_open_probes": 2
+      },
+      "probe": {
+        "enabled": true,
+        "interval": "5s",
+        "timeout": "2s",
+        "path": "/admin/health"
+      }
+    }
+  ],
+  "routes": {
+    "gw-chat": {
+      "targets": [
+        {
+          "provider": "mock-primary",
+          "model": "mock-fast"
+        },
+        {
+          "provider": "mock-secondary",
+          "model": "mock-fast"
+        }
+      ],
+      "allow_failover": true,
+      "max_attempts": 3
+    },
+    "gw-smart": {
+      "targets": [
+        {
+          "provider": "mock-primary",
+          "model": "mock-smart"
+        },
+        {
+          "provider": "mock-secondary",
+          "model": "mock-smart"
+        },
+        {
+          "provider": "mock-primary",
+          "model": "mock-fast"
+        }
+      ],
+      "allow_failover": true,
+      "max_attempts": 3
+    }
+  },
+  "tenants": [
+    {
+      "id": "bench",
+      "api_key_hash": "b0962662e937d44c699c8305d90cbf190b3150c59b13863d1380b5cc3c711bb7",
+      "budget_limit": "",
+      "budget_period": "",
+      "soft_threshold_pct": 0,
+      "allowed_models": [
+        "gw-chat",
+        "gw-smart"
+      ],
+      "cache_pool": ""
+    },
+    {
+      "id": "small",
+      "api_key_hash": "c82a55ac11519a446f6e4ae027aaf69d6cc0ebb95b2557ddbd4a7097c56e02a9",
+      "budget_limit": "0.005",
+      "budget_period": "hour",
+      "soft_threshold_pct": 80,
+      "allowed_models": [
+        "gw-chat",
+        "gw-smart"
+      ],
+      "cache_pool": ""
+    }
+  ],
+  "pricing": [
+    {
+      "model": "mock-fast",
+      "input_per_1m_tokens": "0.15",
+      "cached_input_per_1m_tokens": "0.075",
+      "output_per_1m_tokens": "0.60",
+      "note": "demo price for the mock provider; not a real model"
+    },
+    {
+      "model": "mock-smart",
+      "input_per_1m_tokens": "2.50",
+      "cached_input_per_1m_tokens": "1.25",
+      "output_per_1m_tokens": "10.00",
+      "note": "demo price for the mock provider; not a real model"
+    },
+    {
+      "model": "mock-thinking",
+      "input_per_1m_tokens": "1.10",
+      "cached_input_per_1m_tokens": "0.55",
+      "output_per_1m_tokens": "4.40",
+      "note": "demo reasoning model; output rate covers reasoning tokens too"
+    },
+    {
+      "model": "mock-cached",
+      "input_per_1m_tokens": "0.15",
+      "cached_input_per_1m_tokens": "0.0375",
+      "output_per_1m_tokens": "0.60",
+      "note": "demo model that reports cached prompt tokens"
+    }
+  ],
+  "cache": {
+    "enabled": true,
+    "max_bytes": 67108864,
+    "ttl": "10m0s",
+    "max_entry_bytes": 1048576,
+    "cache_non_deterministic": false,
+    "cache_truncated": false,
+    "sweep_interval": "1m0s"
+  }
+}

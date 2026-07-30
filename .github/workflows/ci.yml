@@ -1,0 +1,50 @@
+name: ci
+
+# Everything here runs offline with no credentials. The gateway is exercised
+# against two local mock providers, so CI reproduces the project's central claim
+# — that the cost ledger reconciles exactly against provider logs — on every
+# push, not just as a committed number a reader has to trust.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: format
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt: these files need formatting:"; gofmt -l .; exit 1; }
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # The race detector is not optional for this project: the budget
+      # reservation path, the circuit breaker, the cache and the metrics registry
+      # are touched by every in-flight request at once, and a data race there
+      # surfaces in production as an inexplicable billing discrepancy rather than
+      # as a crash. Run the whole suite under -race.
+      - name: test (race)
+        run: go test ./... -race -count=1
+
+      # Brief fuzzing of the SSE codec. Framing is the one place a parser bug
+      # silently corrupts every streamed response rather than failing loudly.
+      - name: fuzz sse framing
+        run: go test ./internal/sse/ -run=Fuzz -fuzz=FuzzRoundTrip -fuzztime=20s
+
+      # The end-to-end reconciliation gate: drive real traffic through the
+      # gateway to two mock providers and assert the ledger reconciles exactly.
+      - name: end-to-end self-check (reconciliation)
+        run: |
+          make build
+          ./scripts/selfcheck.sh

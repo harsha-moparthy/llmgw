@@ -1,0 +1,62 @@
+{
+  "mode": "cache",
+  "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback",
+  "started_at": "2026-07-30T07:59:19Z",
+  "finished_at": "2026-07-30T07:59:19Z",
+  "host": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cores": 14,
+    "mem_gb": 48,
+    "go_version": "1.26.5",
+    "machine": "Mac16,7"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:8080",
+    "admin": "http://127.0.0.1:9090",
+    "model": "gw-chat",
+    "n": 400,
+    "concurrency": 16,
+    "max_tokens": 32,
+    "warmup": 200,
+    "ledger_path": "data/ledger.jsonl",
+    "provider_log_path": "data/requests.jsonl",
+    "kill_after": 3000000000,
+    "duration": 12000000000,
+    "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback"
+  },
+  "cache": {
+    "cold_requests": 400,
+    "warm_requests": 400,
+    "cold_pass_hits": 0,
+    "errors": 0,
+    "hit_rate": 1,
+    "cold_latency": {
+      "count": 400,
+      "min": 308,
+      "mean": 1468.6975,
+      "p50": 1356,
+      "p90": 2200,
+      "p95": 2332,
+      "p99": 4616,
+      "p999": 4739,
+      "max": 4739,
+      "unit": "us"
+    },
+    "warm_latency": {
+      "count": 400,
+      "min": 100,
+      "mean": 382.6725,
+      "p50": 318,
+      "p90": 643,
+      "p95": 792,
+      "p99": 940,
+      "p999": 1049,
+      "max": 1049,
+      "unit": "us"
+    },
+    "speedup_x": 4.264150943396227,
+    "method_note": "Cold pass sends N distinct deterministic (temperature=0) prompts; the warm pass repeats the identical N. Hit rate is measured on the warm pass only. Reusing one prompt N times would measure the cache against itself."
+  }
+}

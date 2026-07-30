@@ -1,0 +1,74 @@
+{
+  "mode": "stream",
+  "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback",
+  "started_at": "2026-07-30T07:59:16Z",
+  "finished_at": "2026-07-30T07:59:19Z",
+  "host": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cores": 14,
+    "mem_gb": 48,
+    "go_version": "1.26.5",
+    "machine": "Mac16,7"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:8080",
+    "admin": "http://127.0.0.1:9090",
+    "model": "gw-chat",
+    "n": 300,
+    "concurrency": 16,
+    "max_tokens": 32,
+    "warmup": 200,
+    "ledger_path": "data/ledger.jsonl",
+    "provider_log_path": "data/requests.jsonl",
+    "kill_after": 3000000000,
+    "duration": 12000000000,
+    "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback"
+  },
+  "stream": {
+    "requests": 300,
+    "errors": 0,
+    "ttfb": {
+      "count": 300,
+      "min": 12560,
+      "mean": 15030.066666666668,
+      "p50": 14893,
+      "p90": 16591,
+      "p95": 16909,
+      "p99": 17440,
+      "p999": 17958,
+      "max": 17958,
+      "unit": "us"
+    },
+    "total": {
+      "count": 300,
+      "min": 69934,
+      "mean": 73592.17333333334,
+      "p50": 73501,
+      "p90": 75448,
+      "p95": 75895,
+      "p99": 76856,
+      "p999": 77565,
+      "max": 77565,
+      "unit": "us"
+    },
+    "inter_frame_gap": {
+      "count": 15000,
+      "min": 0,
+      "mean": 1168.1706,
+      "p50": 1218,
+      "p90": 1394,
+      "p95": 1477,
+      "p99": 1693,
+      "p999": 2239,
+      "max": 3035,
+      "unit": "us"
+    },
+    "frames_total": 15300,
+    "clean_ends": 300,
+    "truncated": 0,
+    "mean_frames_per_request": 51,
+    "method_note": "Measured with an incremental SSE reader, so TTFB is the time to the first content frame rather than to the full response. A stream is 'clean' only if it ended with the [DONE] sentinel; anything else is counted as truncated, which is what makes a silently-cut stream visible instead of passing as a success."
+  }
+}

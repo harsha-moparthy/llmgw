@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "Mock provider configuration. This file defines the instrument that every",
+    "measurement in this project is taken with, so its parameters are part of the",
+    "method and are committed alongside the results.",
+    "",
+    "The price list here is the mock provider's OWN, deliberately separate from the",
+    "gateway's pricing table in gateway.example.json. The cost reconciliation",
+    "compares two independently computed numbers; if both sides read the same price",
+    "list through the same code, a bug in that code cancels out and the",
+    "reconciliation passes while both invoices are wrong. The two files are expected",
+    "to agree, and the reconciliation is what proves they do.",
+    "",
+    "Latencies are chosen to be realistic but fast enough that a 2000-request",
+    "benchmark finishes in seconds: a real provider's TTFB is 200-800ms, and using",
+    "that here would make every benchmark a 20-minute affair without changing what",
+    "is being measured (the gateway's own overhead is independent of how long the",
+    "provider takes)."
+  ],
+  "listen": "127.0.0.1:9001",
+  "admin_listen": "127.0.0.1:9091",
+  "log_path": "data/requests.jsonl",
+  "default_model": "mock-fast",
+  "models": {
+    "mock-fast": {
+      "ttfb_ms": 12,
+      "inter_token_ms": 1,
+      "completion_tokens": 48,
+      "prompt_price_per_1m": "0.15",
+      "cached_prompt_price_per_1m": "0.075",
+      "completion_price_per_1m": "0.60",
+      "reasoning": false
+    },
+    "mock-smart": {
+      "_comment": "The expensive tier a degraded-budget route falls back FROM, and the target of the cost-control demonstration.",
+      "ttfb_ms": 30,
+      "inter_token_ms": 2,
+      "completion_tokens": 64,
+      "prompt_price_per_1m": "2.50",
+      "cached_prompt_price_per_1m": "1.25",
+      "completion_price_per_1m": "10.00",
+      "reasoning": false
+    },
+    "mock-thinking": {
+      "_comment": [
+        "A reasoning model. It reports reasoning_tokens inside",
+        "completion_tokens_details, which is the trap the pricing package has a",
+        "test for: those tokens are ALREADY included in completion_tokens, and",
+        "adding them again double-bills a thinking model by roughly 10x."
+      ],
+      "ttfb_ms": 40,
+      "inter_token_ms": 1,
+      "completion_tokens": 40,
+      "reasoning_tokens": 320,
+      "prompt_price_per_1m": "1.10",
+      "cached_prompt_price_per_1m": "0.55",
+      "completion_price_per_1m": "4.40",
+      "reasoning": true
+    },
+    "mock-cached": {
+      "_comment": "Reports cached_tokens, exercising the other half-billing trap: prompt_tokens already includes cached_tokens.",
+      "ttfb_ms": 10,
+      "inter_token_ms": 1,
+      "completion_tokens": 32,
+      "cached_prompt_fraction": 0.5,
+      "prompt_price_per_1m": "0.15",
+      "cached_prompt_price_per_1m": "0.0375",
+      "completion_price_per_1m": "0.60",
+      "reasoning": false
+    }
+  },
+  "faults": {
+    "_comment": [
+      "All faults default to off. They are switched on at runtime through the admin",
+      "endpoint (POST /admin/fault?down=true), which is how the failover benchmark",
+      "kills a provider mid-flight under load rather than restarting it between runs.",
+      "Restarting between runs would measure startup, not failover."
+    ],
+    "down": false,
+    "status_code": 0,
+    "status_body": "",
+    "retry_after_s": 0,
+    "added_latency_ms": 0,
+    "p99_spike_ms": 0,
+    "p99_spike_rate": 0.0,
+    "mid_stream_abort_after": 0,
+    "mid_stream_stall_after": 0,
+    "malformed_sse": false,
+    "malformed_json": false,
+    "truncate_at_length": false,
+    "error_rate": 0.0
+  }
+}
