@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/harsha-moparthy/llmgw/internal/apiv1"
@@ -46,6 +47,17 @@ type sseWriter struct {
 	// clientGone is set if a write to the client failed; the router treats the
 	// returned error as a client disconnect.
 	clientGone bool
+
+	// attemptProvider/attemptModel/attemptNo are published by the router before
+	// each attempt, so headerFn can stamp them when it commits the response.
+	attemptProvider string
+	attemptModel    string
+	attemptNo       int
+}
+
+// OnAttempt implements router.ProgressSink.
+func (s *sseWriter) OnAttempt(provider, model string, attempt int) {
+	s.attemptProvider, s.attemptModel, s.attemptNo = provider, model, attempt
 }
 
 func (s *sseWriter) ensureStarted() error {
@@ -72,11 +84,18 @@ func (s *sseWriter) ensureStarted() error {
 
 // OnChunk forwards a content chunk, starting the response on the first one.
 func (s *sseWriter) OnChunk(chunk *apiv1.ChatChunk, raw []byte) error {
-	// Only content chunks open the response and count as "contentful". An
-	// opening role frame with empty content does NOT close the failover window,
-	// because a provider that emits its role frame and then immediately dies is
-	// still cleanly replaceable.
-	hasContent := chunk != nil && chunk.DeltaText() != ""
+	// "Content" is anything a client would lose if it were dropped — NOT just
+	// delta text. Gating on text alone silently discarded whole classes of
+	// response: a tool-call stream carries its payload in delta.tool_calls with
+	// empty text, so the client received only `data: [DONE]`; and an
+	// empty-completion stream lost its finish_reason and usage frames the same
+	// way.
+	//
+	// The role-only opening frame is still deliberately NOT content: a provider
+	// that emits its role frame and then dies is cleanly replaceable, and keeping
+	// that frame out of the "contentful" set is what holds the transparent-
+	// failover window open. Everything else must reach the client.
+	hasContent := chunkIsForwardable(chunk)
 
 	if !s.started {
 		if !hasContent {
@@ -165,22 +184,43 @@ func (s *sseWriter) OnDone() {
 func (s *Server) serveStreaming(w http.ResponseWriter, r *http.Request, tenant tenantT, route *router.Route, req *apiv1.ChatRequest, reqID string, reservation budget.Reservation, committed *bool, collector *attemptCollector, execOpt router.ExecOptions, scope cache.Scope, start time.Time) {
 	ctx := provider.WithCorrelation(r.Context(), provider.Correlation{RequestID: reqID, Attempt: 1})
 
+	// The attempt headers must be stamped BEFORE WriteHeader commits the
+	// response, and at that moment the router is mid-flight so the final attempt
+	// count is not yet known. The router publishes the target it is currently
+	// attempting through this pointer, so a streaming client still learns which
+	// provider served it and whether failover occurred — previously the streaming
+	// path set none of these headers at all.
 	sink := &sseWriter{
 		w:      w,
 		req:    req,
 		logger: s.deps.Logger,
-		headerFn: func() {
-			w.Header().Set(HeaderRequestID, reqID)
-			w.Header().Set(HeaderCache, "miss")
-		},
+	}
+	// Assigned after construction because the closure reads the sink's own
+	// attempt fields, which the router publishes via OnAttempt before each
+	// attempt runs. Headers are committed at the first frame — mid-attempt — so
+	// this is the only point at which the serving provider is knowable.
+	sink.headerFn = func() {
+		w.Header().Set(HeaderRequestID, reqID)
+		w.Header().Set(HeaderCache, "miss")
+		if sink.attemptProvider != "" {
+			w.Header().Set(HeaderProvider, sink.attemptProvider)
+			w.Header().Set(HeaderModel, sink.attemptModel)
+		}
+		w.Header().Set(HeaderAttempts, strconv.Itoa(sink.attemptNo))
 	}
 
 	ar, fail := s.deps.Router.ExecuteStream(ctx, tenant.ID, route, req, sink, execOpt)
 
-	upstreamUs := s.flushLedger(collector, reqID, req.Model, tokenEstimate{prompt: execOpt.EstPromptTokens, max: execOpt.EstMaxTokens}, start)
+	upstreamUs, billedCost := s.flushLedger(collector, reqID, req.Model, tokenEstimate{prompt: execOpt.EstPromptTokens, max: execOpt.EstMaxTokens}, start)
 
-	// Resolve the budget with the actual streamed cost.
-	actualCost := s.streamedCost(collector, ar)
+	// Resolve the budget with what the ledger actually attributed to this
+	// request — which includes a billed-but-failed attempt, not just the served
+	// one. Using only the served attempt's cost would make a mid-stream failure
+	// free to the tenant while the provider still charged for it.
+	actualCost := billedCost
+	if actualCost == 0 {
+		actualCost = s.streamedCost(collector, ar)
+	}
 	if s.deps.Budget != nil && reservation.Valid() {
 		_, _ = s.deps.Budget.Commit(reservation, actualCost)
 		*committed = true
@@ -279,3 +319,42 @@ type loggerT interface {
 }
 
 var _ context.Context // context imported for signature symmetry with the router
+
+// chunkIsForwardable reports whether a chunk carries anything a client would
+// lose if it were dropped.
+//
+// This is deliberately broader than "has delta text". A chunk counts when it
+// carries any of:
+//   - delta text (the ordinary case),
+//   - tool calls (a tool-call stream has NO text at all — its entire payload is
+//     delta.tool_calls, so a text-only test discards the whole response),
+//   - a finish_reason (the client needs to know why generation stopped),
+//   - a usage record (the terminal accounting frame).
+//
+// A role-only opening frame carries none of these and is intentionally excluded,
+// which is what keeps the transparent-failover window open until real output
+// arrives.
+func chunkIsForwardable(chunk *apiv1.ChatChunk) bool {
+	if chunk == nil {
+		return false
+	}
+	if chunk.Usage != nil {
+		return true
+	}
+	for i := range chunk.Choices {
+		c := &chunk.Choices[i]
+		if c.FinishReason != nil && *c.FinishReason != "" {
+			return true
+		}
+		if c.Delta == nil {
+			continue
+		}
+		if c.Delta.Content.Text() != "" {
+			return true
+		}
+		if len(c.Delta.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}

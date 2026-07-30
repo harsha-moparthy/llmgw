@@ -639,6 +639,15 @@ func runCache(ctx context.Context, cfg benchConfig) (*CacheResult, error) {
 	// look like a bug rather than the policy it is.
 	cc := cfg
 	cc.N = min(cfg.N, 400)
+	// Raise the completion cap above the mock's configured reply length. With the
+	// default -max-tokens=32 the provider stops AT the cap and reports
+	// finish_reason "length", and the cache correctly refuses to store a truncated
+	// response — so the whole warm pass would miss and the benchmark would measure
+	// the cache's safety policy instead of the cache. Documented rather than
+	// silently reported as a 0% hit rate.
+	if cc.MaxTokens < 512 {
+		cc.MaxTokens = 512
+	}
 
 	var (
 		mu           sync.Mutex

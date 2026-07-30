@@ -267,11 +267,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	promptTokens := tokens.Reference.CountRequest(&req)
+
+	// Honour the client's completion cap. A real provider CANNOT exceed
+	// max_tokens — it stops and reports finish_reason "length" — so a mock that
+	// ignored the cap would be a dishonest instrument: it made the gateway's
+	// (correct, deliberately conservative) pre-flight estimate look like an
+	// under-estimate in the cost reconciliation, when in fact the mock was
+	// generating more tokens than any real provider would have been allowed to.
+	// That is exactly backwards from the property the estimator guarantees, and
+	// it produced a false "the estimate under-counts" signal in a committed
+	// benchmark artifact.
 	target := mc.CompletionTokens
+	cappedByClient := false
+	if cap := req.EffectiveMaxTokens(); cap > 0 && cap < target {
+		target = cap
+		cappedByClient = true
+	}
 	replyText := generateReply(seed, target)
 	completionTextTokens := tokens.Reference.Count(replyText)
 
 	finish := apiv1.FinishStop
+	if cappedByClient {
+		// Stopped because the cap was reached, not because the model was done.
+		finish = apiv1.FinishLength
+	}
 	if faults.TruncateAtLength {
 		finish = apiv1.FinishLength
 	}

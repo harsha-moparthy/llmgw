@@ -1,8 +1,8 @@
 {
   "mode": "cache",
   "label": "Apple M4 Pro (14 cores), 2 mock providers, loopback",
-  "started_at": "2026-07-30T07:59:19Z",
-  "finished_at": "2026-07-30T07:59:19Z",
+  "started_at": "2026-07-30T09:43:37Z",
+  "finished_at": "2026-07-30T09:43:37Z",
   "host": {
     "os": "darwin",
     "arch": "arm64",
@@ -34,29 +34,29 @@
     "hit_rate": 1,
     "cold_latency": {
       "count": 400,
-      "min": 308,
-      "mean": 1468.6975,
-      "p50": 1356,
-      "p90": 2200,
-      "p95": 2332,
-      "p99": 4616,
-      "p999": 4739,
-      "max": 4739,
+      "min": 367,
+      "mean": 1904.9675,
+      "p50": 1592,
+      "p90": 2012,
+      "p95": 2578,
+      "p99": 12753,
+      "p999": 13318,
+      "max": 13318,
       "unit": "us"
     },
     "warm_latency": {
       "count": 400,
-      "min": 100,
-      "mean": 382.6725,
-      "p50": 318,
-      "p90": 643,
-      "p95": 792,
-      "p99": 940,
-      "p999": 1049,
-      "max": 1049,
+      "min": 99,
+      "mean": 404.9225,
+      "p50": 335,
+      "p90": 742,
+      "p95": 889,
+      "p99": 1275,
+      "p999": 1470,
+      "max": 1470,
       "unit": "us"
     },
-    "speedup_x": 4.264150943396227,
+    "speedup_x": 4.7522388059701495,
     "method_note": "Cold pass sends N distinct deterministic (temperature=0) prompts; the warm pass repeats the identical N. Hit rate is measured on the warm pass only. Reusing one prompt N times would measure the cache against itself."
   }
 }

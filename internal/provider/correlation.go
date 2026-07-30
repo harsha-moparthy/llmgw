@@ -57,6 +57,14 @@ func correlationFrom(ctx context.Context) (Correlation, bool) {
 	return c, ok
 }
 
+// CorrelationFrom returns the correlation carried by a context, and whether one
+// was present.
+//
+// Exported so a caller can log or assert on what an attempt was actually told —
+// which matters because the (request id, attempt) pair is the key the cost
+// reconciliation joins on, and a mismatch there makes a correct bill look wrong.
+func CorrelationFrom(ctx context.Context) (Correlation, bool) { return correlationFrom(ctx) }
+
 // applyCorrelation sets the correlation headers on an upstream request.
 func applyCorrelation(ctx context.Context, req *http.Request) {
 	if c, ok := correlationFrom(ctx); ok {

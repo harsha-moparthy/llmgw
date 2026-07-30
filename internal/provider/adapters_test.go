@@ -440,3 +440,168 @@ func TestConnectFailureClassified(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+// TestAnthropicStampsCreated pins a bug found by audit: Anthropic's Messages API
+// returns no creation timestamp, but OpenAI's schema has a required `created`
+// field that clients render as the completion time. Both the streaming and
+// non-streaming translations previously left it at zero, so every
+// Anthropic-served response claimed 1 January 1970.
+func TestAnthropicStampsCreated(t *testing.T) {
+	const fixed = 1785400000
+	clock := func() time.Time { return time.Unix(fixed, 0) }
+
+	t.Run("non-streaming", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"msg_1","model":"claude","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`)
+		}))
+		defer srv.Close()
+		p := NewAnthropicProvider(AnthropicConfig{Name: "a", BaseURL: srv.URL, APIKey: "k", Now: clock})
+		res, f := p.Chat(context.Background(), simpleReq(), "claude")
+		if f != nil {
+			t.Fatal(f)
+		}
+		if res.Response.Created != fixed {
+			t.Errorf("created = %d, want %d (0 renders as 1970 in every client)", res.Response.Created, fixed)
+		}
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		stream := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude\",\"usage\":{\"input_tokens\":10}}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, stream)
+		}))
+		defer srv.Close()
+		p := NewAnthropicProvider(AnthropicConfig{Name: "a", BaseURL: srv.URL, APIKey: "k", Now: clock})
+		st, f := p.ChatStream(context.Background(), simpleReq(), "claude")
+		if f != nil {
+			t.Fatal(f)
+		}
+		defer st.Close()
+		seen := 0
+		for ev := range st.Events() {
+			if ev.Chunk == nil {
+				continue
+			}
+			seen++
+			if ev.Chunk.Created != fixed {
+				t.Errorf("chunk %d created = %d, want %d", seen, ev.Chunk.Created, fixed)
+			}
+		}
+		if seen == 0 {
+			t.Fatal("no chunks observed; the test would prove nothing")
+		}
+	})
+}
+
+// TestKeepAliveDoesNotKillStream pins a bug found by audit. Real providers emit
+// keep-alives to hold a connection open through a long generation. Three forms
+// are common, and all three previously killed the stream mid-response with
+// "unexpected end of JSON input" — truncating a healthy response AND counting the
+// failure against the provider's health, which could open its breaker.
+//
+// The root cause was that sse.Event.IsComment() required non-empty comment text,
+// so a bare ":" produced an event that was neither comment nor data and fell
+// through to json.Unmarshal.
+func TestKeepAliveDoesNotKillStream(t *testing.T) {
+	for _, tc := range []struct{ name, frame string }{
+		{"bare colon", ":\n\n"},
+		{"colon space", ": \n\n"},
+		{"comment with text", ": ping\n\n"},
+		{"empty data frame", "data:\n\n"},
+		{"whitespace data frame", "data:  \n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n" +
+				tc.frame +
+				"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n" +
+				"data: [DONE]\n\n"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(200)
+				_, _ = io.WriteString(w, stream)
+			}))
+			defer srv.Close()
+
+			st, f := newOpenAITestProvider(srv.URL).ChatStream(context.Background(), simpleReq(), "gpt-4o")
+			if f != nil {
+				t.Fatal(f)
+			}
+			defer st.Close()
+
+			var text strings.Builder
+			var done bool
+			var failure *Failure
+			for ev := range st.Events() {
+				if ev.Err != nil {
+					failure = ev.Err
+				}
+				if ev.Done {
+					done = true
+				}
+				if ev.Chunk != nil {
+					text.WriteString(ev.Chunk.DeltaText())
+				}
+			}
+			if failure != nil {
+				t.Errorf("a %s keep-alive produced a failure: %v", tc.name, failure)
+			}
+			if !done {
+				t.Errorf("a %s keep-alive prevented the stream from completing", tc.name)
+			}
+			if text.String() != "Hello" {
+				t.Errorf("text = %q, want %q: the client was cut off mid-response", text.String(), "Hello")
+			}
+		})
+	}
+}
+
+// TestAnthropicTruncationSurfacesFailure pins the Anthropic half of the
+// truncation bug. Anthropic terminates a stream with message_stop; reaching EOF
+// without it means the response was cut short. Emitting a clean Done there served
+// a half-generated Claude response as a complete one — the same defect that was
+// already fixed for OpenAI's [DONE] sentinel.
+func TestAnthropicTruncationSurfacesFailure(t *testing.T) {
+	// message_start + one delta, then the body closes with NO message_stop.
+	partial := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude\",\"usage\":{\"input_tokens\":10}}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Par\"}}\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, partial)
+	}))
+	defer srv.Close()
+
+	st, f := newAnthropicTestProvider(srv.URL).ChatStream(context.Background(), simpleReq(), "claude")
+	if f != nil {
+		t.Fatal(f)
+	}
+	defer st.Close()
+
+	var sawDone bool
+	var failure *Failure
+	for ev := range st.Events() {
+		if ev.Err != nil {
+			failure = ev.Err
+		}
+		if ev.Done {
+			sawDone = true
+		}
+	}
+	if sawDone {
+		t.Error("a truncated Anthropic stream reported a clean end; the client would " +
+			"receive a half-generated response as complete")
+	}
+	if failure == nil {
+		t.Fatal("a truncated Anthropic stream produced no failure event")
+	}
+	// The partial usage must survive so the attempt is still billed.
+	if failure.UsageAtFailure == nil || failure.UsageAtFailure.PromptTokens != 10 {
+		t.Errorf("failure lost the usage accumulated before truncation: %+v", failure.UsageAtFailure)
+	}
+}

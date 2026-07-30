@@ -172,24 +172,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // serveNonStreaming runs the non-streaming path.
 func (s *Server) serveNonStreaming(w http.ResponseWriter, r *http.Request, tenant tenantT, route *router.Route, req *apiv1.ChatRequest, reqID string, reservation budget.Reservation, committed *bool, collector *attemptCollector, execOpt router.ExecOptions, scope cache.Scope, start time.Time) {
+	// Seed the correlation with the request id; the router overwrites the attempt
+	// number per attempt (provider.WithAttempt), so the number a provider logs is
+	// the number the ledger records. That pairing is what the reconciliation
+	// joins on — see TestAttemptNumberIsStampedPerAttempt.
 	ctx := provider.WithCorrelation(r.Context(), provider.Correlation{RequestID: reqID, Attempt: 1})
-	// The correlation attempt is refined per-attempt inside the router via the
-	// ledger sink; for the upstream header we pass the request id and let the
-	// adapter stamp attempt 1. Multi-attempt correlation is handled by the mock
-	// reading the attempt header, which the router does not currently vary per
-	// attempt — documented limitation: the reconciliation matches on request id,
-	// and attempts share it, so the (id, attempt) pair is unique per row via the
-	// ledger's own attempt number.
 
 	res, ar, fail := s.deps.Router.Execute(ctx, tenant.ID, route, req, execOpt)
 
 	s.writeAttemptHeaders(w, ar, start)
-	upstreamUs := s.flushLedger(collector, reqID, req.Model, tokenEstimate{prompt: execOpt.EstPromptTokens, max: execOpt.EstMaxTokens}, start)
+	upstreamUs, billedCost := s.flushLedger(collector, reqID, req.Model, tokenEstimate{prompt: execOpt.EstPromptTokens, max: execOpt.EstMaxTokens}, start)
 
 	if fail != nil {
 		status := statusForFailure(fail)
 		if s.deps.Budget != nil && reservation.Valid() {
-			_ = s.deps.Budget.Release(reservation)
+			// A failed request is NOT automatically free. Some failures — a
+			// timeout, a 5xx after generation began, a client cancellation —
+			// are billed by the provider, and flushLedger has just recorded
+			// exactly that cost (measured where the provider reported usage,
+			// estimated where it did not). Releasing the whole hold here would
+			// let a tenant burn unlimited budget through a failing upstream and
+			// never be rejected, because the ledger would show spend the budget
+			// never saw. So commit what was actually charged; Commit(0) is
+			// equivalent to a full release when nothing was billed.
+			_, _ = s.deps.Budget.Commit(reservation, billedCost)
 			*committed = true
 		}
 		s.recordRequestMetric(tenant.ID, req.Model, status, start)
@@ -286,12 +292,16 @@ func (s *Server) cacheScope(t tenantT) cache.Scope {
 // gateway's total drift below the invoice exactly when things go wrong. So such
 // a row is written with an ESTIMATED cost, flagged SourceEstimated, which is the
 // ledger's documented NeedsEstimate contract.
-func (s *Server) flushLedger(collector *attemptCollector, reqID, requestedModel string, est tokenEstimate, now time.Time) int64 {
+// It returns the served attempt's upstream latency and the TOTAL cost the ledger
+// attributed to this request across every attempt — which the caller commits
+// against the tenant's budget, so a billed failure is not silently free.
+func (s *Server) flushLedger(collector *attemptCollector, reqID, requestedModel string, est tokenEstimate, now time.Time) (int64, money.Pico) {
 	collector.mu.Lock()
 	outcomes := collector.outcomes
 	collector.mu.Unlock()
 
 	var upstreamUs int64
+	var billed money.Pico
 	for _, o := range outcomes {
 		if o.Failure == nil {
 			upstreamUs = o.Latency.Microseconds()
@@ -304,9 +314,12 @@ func (s *Server) flushLedger(collector *attemptCollector, reqID, requestedModel 
 		if err := s.deps.Ledger.Append(entry); err != nil {
 			s.deps.Logger.Warn("ledger append failed", "err", err, "request_id", reqID)
 		}
+		if sum, err := money.Add(billed, entry.CostPico); err == nil {
+			billed = sum
+		}
 		s.recordAttemptMetrics(o)
 	}
-	return upstreamUs
+	return upstreamUs, billed
 }
 
 // tokenEstimate is the request's pre-flight estimate, carried to the ledger flush

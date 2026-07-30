@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -92,7 +93,16 @@ func (s *openaiStream) run(ctx context.Context) {
 				return
 			}
 			class := ClassUpstream5xx
-			if errors.Is(err, sse.ErrTruncated) {
+			switch {
+			case ctx.Err() != nil:
+				// The read failed because OUR context was cancelled — the client
+				// went away, or the request deadline fired. That is not evidence
+				// about the provider, and classifying it as upstream_5xx would feed
+				// a healthy provider's circuit breaker every time a client
+				// disconnected mid-stream. ClassCancelled does not count against
+				// health, which is the correct accounting.
+				class = ClassCancelled
+			case errors.Is(err, sse.ErrTruncated):
 				class = ClassTimeout // a stream that dies mid-frame is, to us, a timeout-class transport failure
 			}
 			s.emit(StreamEvent{Err: &Failure{
@@ -101,9 +111,15 @@ func (s *openaiStream) run(ctx context.Context) {
 			}})
 			return
 		}
-		if ev.IsComment() {
-			// Keep-alive. Forward it so a caller can reset a read deadline, but
-			// it carries no content.
+		// Keep-alives carry no content. Both forms must be skipped BEFORE the JSON
+		// parse below: a bare ":\n\n" comment and an empty "data:\n\n" frame are
+		// each things real providers emit to hold a connection open, and feeding
+		// either to json.Unmarshal yields "unexpected end of JSON input" — which
+		// this loop would then report as an upstream failure, truncating a
+		// perfectly healthy response mid-stream and counting it against the
+		// provider's health. Forward as a contentless event so a caller can reset
+		// a read deadline on upstream activity.
+		if ev.IsComment() || len(bytes.TrimSpace(ev.Data)) == 0 {
 			s.emit(StreamEvent{Raw: nil})
 			continue
 		}

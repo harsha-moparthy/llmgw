@@ -464,3 +464,52 @@ func TestStartAndShutdown(t *testing.T) {
 		t.Errorf("Shutdown: %v", err)
 	}
 }
+
+// TestMockHonoursMaxTokens pins a bug found by audit: the mock ignored the
+// client's max_tokens and generated its configured length regardless. A real
+// provider cannot exceed the cap, so the mock was emitting more completion
+// tokens than any real upstream would — which made the gateway's deliberately
+// conservative pre-flight estimate look like an UNDER-estimate in the cost
+// reconciliation. The instrument was wrong, not the estimator.
+func TestMockHonoursMaxTokens(t *testing.T) {
+	cfg := testConfig()
+	cfg.Models["fast"].CompletionTokens = 48 // more than the cap below
+	_, _, hs := newTestServer(t, cfg)
+
+	body, _ := json.Marshal(map[string]any{
+		"model":      "fast",
+		"messages":   []map[string]string{{"role": "user", "content": "cap me"}},
+		"max_tokens": 32,
+	})
+	resp := post(t, hs.URL, body)
+	defer resp.Body.Close()
+	var cr apiv1.ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if cr.Usage.CompletionTokens > 32 {
+		t.Errorf("completion_tokens = %d, exceeds the client's max_tokens of 32; "+
+			"no real provider may do this", cr.Usage.CompletionTokens)
+	}
+	// Stopping at the cap is finish_reason "length", not "stop".
+	if got := *cr.Choices[0].FinishReason; got != apiv1.FinishLength {
+		t.Errorf("finish_reason = %q, want %q when the cap truncated the response",
+			got, apiv1.FinishLength)
+	}
+
+	// And with a cap ABOVE the configured length, the model finishes naturally.
+	body2, _ := json.Marshal(map[string]any{
+		"model":      "fast",
+		"messages":   []map[string]string{{"role": "user", "content": "room to finish"}},
+		"max_tokens": 4096,
+	})
+	r2 := post(t, hs.URL, body2)
+	defer r2.Body.Close()
+	var cr2 apiv1.ChatResponse
+	if err := json.NewDecoder(r2.Body).Decode(&cr2); err != nil {
+		t.Fatal(err)
+	}
+	if got := *cr2.Choices[0].FinishReason; got != apiv1.FinishStop {
+		t.Errorf("finish_reason = %q, want %q when the cap was not reached", got, apiv1.FinishStop)
+	}
+}

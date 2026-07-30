@@ -1,6 +1,6 @@
 # llmgw — an LLM gateway: routing, failover, caching, cost control
 
-**One OpenAI-compatible API in front of many providers, in zero-dependency Go. It fails over around a dead provider within a bounded window (demonstrated by killing a provider under 198k requests of live load, with zero client-visible errors), enforces per-tenant budgets with clear rejection semantics, streams responses with a documented mid-stream failover boundary, and keeps a cost ledger that reconciles _exactly_ against the providers' own logs — 204,175 of 204,175 settled rows, to the picodollar. Added latency is 1.9 ms p99 (gateway self-timed) / 3.4 ms p99 (client-observed upper bound), excluding provider time, at ~18k req/s on one laptop.**
+**One OpenAI-compatible API in front of many providers, in zero-dependency Go. It fails over around a dead provider within a bounded window (demonstrated by killing a provider under 120k requests of live load, with zero client-visible errors), enforces per-tenant budgets with clear rejection semantics, streams responses with a documented mid-stream failover boundary, and keeps a cost ledger that reconciles _exactly_ against the providers' own logs — 120,901 of 120,901 rows, to the picodollar, with zero mismatches in either direction. Added latency is 1.8 ms p99 (gateway self-timed) / 3.0 ms p99 (client-observed upper bound), excluding provider time, at ~19.5k req/s on one laptop.**
 
 > Suggested GitHub repo name: `llmgw`
 
@@ -56,20 +56,22 @@ Two accounting traps that a naive gateway gets wrong, each with a test that fail
 1. `completion_tokens` **already includes** reasoning/thinking tokens. Adding `reasoning_tokens` on top double-bills a reasoning model by roughly 10×.
 2. `prompt_tokens` **already includes** cached tokens. Billing the full prompt at the input rate *and* the cached tokens at the cached rate over-bills every cache hit.
 
-Budgets use **estimate-then-true-up**: a pre-flight token estimate (deliberately an over-estimate, so it can only ever reject a request that would have fit, never admit one that will not) reserves against the tenant's remaining budget; the real cost is committed after the response and the unused hold released. Concurrent reservations are proven not to collectively over-admit past the limit by a `-race` test firing hundreds of concurrent `Reserve`s at a small budget. A rejection carries the numbers to act on — limit, spent, remaining, reset — because "budget exceeded" with no numbers forces the client to guess.
+Budgets use **estimate-then-true-up**: a pre-flight token estimate reserves against the tenant's remaining budget; the real cost is committed after the response and the unused hold released. Concurrent reservations are proven not to collectively over-admit past the limit by a `-race` test firing hundreds of concurrent `Reserve`s at a small budget. A rejection carries the numbers to act on — limit, spent, remaining, reset — because "budget exceeded" with no numbers forces the client to guess.
+
+The estimate is conservative **for admission** in the specific sense that matters: when the client sets `max_tokens`, that is a hard ceiling the provider cannot exceed, so pricing the full cap can only over-reserve. Without a client cap the completion length is genuinely unknowable and the estimate falls back to a per-tenant prior, which *can* come in low — so "conservative" is a property of the capped case, not a guarantee in general. Either way the reservation is trued up against the provider's reported usage, so a tenant is never billed from the estimate when a measurement exists.
 
 ## Measured results
 
-All numbers below were measured on an **Apple M4 Pro (14 cores, 48 GB), Go 1.26.5, macOS**, against two local mock providers over loopback. Every figure is reproducible with `make bench`; the raw JSON reports are committed under [`results/`](results/). Where a number is a target rather than a guarantee, it is stated as such.
+All numbers below were measured on an **Apple M4 Pro (14 cores, 48 GB), Go 1.26.5, macOS**, against two local mock providers over loopback. Every figure in the five sections below is reproducible with `make bench`, and its raw JSON report is committed under [`results/`](results/). The k6 numbers further down are the exception and are labelled as such: `make loadtest` runs those scenarios but `bench-all.sh` does not, and no k6 artifact is committed. Where a number is a target rather than a guarantee, it is stated as such.
 
-### Gateway overhead: 1.9 ms p99 self-timed, 3.4 ms p99 client-observed
+### Gateway overhead: 1.8 ms p99 self-timed, 3.0 ms p99 client-observed
 
-5,000 requests, concurrency 32, ~18,500 req/s, 0 errors.
+5,000 requests, concurrency 32, ~19,500 req/s, 0 errors.
 
 | overhead measurement | p50 | p90 | p99 | p99.9 |
 |---|---|---|---|---|
-| **self-reported** (gateway's own timer, excl. upstream) | 0.13 ms | 1.02 ms | **1.88 ms** | 2.85 ms |
-| **subtractive** (client total − reported upstream; upper bound) | 0.85 ms | 1.90 ms | **3.35 ms** | — |
+| **self-reported** (gateway's own timer, excl. upstream) | 0.13 ms | 1.05 ms | **1.84 ms** | 2.56 ms |
+| **subtractive** (client total − reported upstream; upper bound) | 0.83 ms | 1.80 ms | **2.95 ms** | 4.09 ms |
 
 The spec asks for "added latency under 5 ms p99 **excluding provider time**", and excluding provider time is the whole subtlety. The overhead is measured **two ways and both are reported**, because reporting only the flattering one would be the easy dishonesty here:
 
@@ -84,47 +86,50 @@ Steady load of ~16 concurrent workers; the primary provider is **killed mid-flig
 
 | metric | value |
 |---|---|
-| total requests during the run | **198,269** |
-| succeeded | **198,269** |
+| total requests during the run | **120,885** |
+| succeeded | **120,885** |
 | client-visible failures | **0** |
-| requests that failed over to the secondary | 17 |
+| requests that failed over to the secondary | 16 |
 
-The 17 requests in flight to the primary at the instant it died failed over transparently (they were pre-first-byte); the circuit breaker then opened and routed the remaining ~198k requests straight to the secondary with no per-request failure. **The failover window, measured as the span in which any client saw an error, was zero** — the breaker absorbed the outage. This is the spec's headline demonstration: an outage under load produces no client-visible errors.
+The primary served the first ~3 s of the 10 s run (roughly 30% of the requests, ~36k). At t=3 s it was killed: the 16 requests in flight to it failed over transparently (they were pre-first-byte), the circuit breaker opened, and the remaining ~85k requests went to the secondary with no per-request failure. **The failover window, measured as the span in which any client saw an error, was zero** — the breaker absorbed the outage. This is the spec's headline demonstration: an outage under load produces no client-visible errors.
 
-### Cost reconciliation: 204,175 of 204,175 settled rows, exact
+### Cost reconciliation: 120,901 of 120,901 rows, exact
 
 The gateway's ledger and the mock provider's request log are produced by **independent code paths with independent price tables**. That independence is the entire point: if both sides computed cost with the same code, a bug in it would cancel out and the reconciliation would pass while every invoice was wrong. Agreement is therefore *evidence*, not a tautology. Matching is on `(request id, attempt)` with **no tolerance** — a single token or picodollar of disagreement is a mismatch.
 
-Over a run that included the failover kill above (204,602 ledger rows vs 204,185 provider rows):
+Over a run that included the failover kill above (120,917 ledger rows vs 120,901 provider rows):
 
 | | count |
 |---|---|
-| matched exactly (tokens **and** picodollar cost) | **204,175** |
-| settled-row mismatches | **0** |
-| estimated-row mismatches (see below) | 10 |
-| billable ledger rows with no provider record | 0 |
-| provider rows with no ledger record | 0 |
+| matched exactly (tokens **and** picodollar cost) | **120,901** |
+| token mismatches | **0** |
+| cost mismatches | **0** |
+| billable ledger rows with no provider record | **0** |
+| provider rows with no ledger record | **0** |
 
-**Exact among settled rows: true.** The 10 estimated-row mismatches are an honest, understood artifact and are reported as their own category rather than swept in: they are requests the *benchmark harness itself* cancelled at its `-duration` deadline while the provider had already generated the full response. The gateway correctly recorded an **estimated** cost for those (flagged `usage_source: estimated`, and deliberately an over-estimate), because a provider that generated tokens before a cancellation *did* charge for them — recording zero would under-count exactly when things go wrong. An estimate does not equal the provider's exact count, so the reconciler refuses to call it a match, and the report names it for what it is. (This exact case was found by the live failover reconciliation, not by a test — see "Bugs found" #3.)
+Zero mismatches and zero orphans in either direction. Two counts deserve explanation rather than being buried:
 
-### Caching: 100% hit rate on repeat, 4.3× median speedup
+- **The 16-row ledger/provider gap** is the attempts to the killed primary. A connection that was refused never reached the provider, so it has no provider-side row and is correctly classified non-billable — the reconciler accounts for it as gateway-side rather than as a missing charge.
+- **`EXACT (strict)` is still reported as `false`, and that is the reconciler being right.** Four matched rows were built from an *estimate* (a request cancelled after the provider began generating, where no usage was reported). Their numbers happen to agree with the provider's, but `Exact()` deliberately refuses to certify a run containing any estimated row: an estimator that guesses correctly has not turned a guess into a measurement. So the tool reports both — strict `false`, and `EXACT among settled rows: true` — rather than picking the flattering one.
+
+### Caching: 100% hit rate on repeat, 4.8× median speedup
 
 Cold pass of 400 distinct deterministic prompts, then a warm pass of the identical 400.
 
 | | cold p50 | warm p50 | hit rate (warm) | median speedup |
 |---|---|---|---|---|
-| cache | 1.36 ms | 0.32 ms | **100%** | **4.3×** |
+| cache | 1.59 ms | 0.34 ms | **100%** | **4.8×** |
 
 The speedup is modest by construction: the mock provider is *fast* (12 ms TTFB), so the upstream time the cache removes is small. Against a real provider taking 200–800 ms, the same cache removes that entire round trip. The benchmark measures cold and warm as separate passes over distinct prompts precisely so the "speedup" is not the cache measured against itself.
 
-### Streaming: TTFB ≈ 15 ms, 300/300 clean, 0 truncated
+### Streaming: TTFB ≈ 14 ms, 300/300 clean, 0 truncated
 
 300 streaming requests, measured with a real incremental SSE reader (which `k6` cannot do — it buffers the whole response).
 
 | metric | value |
 |---|---|
-| time to first content frame, p50 | 14.9 ms |
-| inter-frame gap, p50 | 1.2 ms |
+| time to first content frame, p50 | 14.3 ms |
+| inter-frame gap, p50 | 1.1 ms |
 | clean ends (terminated with `[DONE]`) | **300 / 300** |
 | truncated | **0** |
 
@@ -152,11 +157,29 @@ Each was found by distrusting something that looked fine, and each is now pinned
 
 **4. The standalone reconcile tool had its own field parser and disagreed with the real one.** `gwbench`'s reconcile mode originally hand-parsed the ledger JSON and read a flat `prompt_tokens` where the ledger nests `tokens.prompt` — so it reported total mismatches while the authoritative `ledger.Reconcile` (used by the tests) passed. A second, subtly-different reconciler is a place for two definitions of "agree" to diverge. Fixed by making `gwbench` delegate to the same `ledger.Reconcile` the tests use; the mock's log schema was aligned to `ledger.ProviderRecord` so no translation step sits between them.
 
+The next eight were found by an adversarial audit pass (parallel reviewers over money, concurrency, streaming, the HTTP surface, and the README itself, each required to demonstrate a failure with a running test rather than assert one). Bugs 5-10 are pinned by regression tests that I verified fail when the fix is reverted. Bugs 11 and 12 are fixed but covered only by the existing suite, not by a dedicated test — stated rather than implied.
+
+**5. A keep-alive frame killed the stream mid-response.** Providers emit keep-alives to hold a connection open through a long generation. `sse.Event.IsComment()` required non-empty comment text, so a bare `":\n\n"` — the cheapest form, and one real providers send — produced an event that was neither comment nor data, fell through to `json.Unmarshal`, and failed with "unexpected end of JSON input". The gateway then reported that as an upstream failure: the client was **truncated mid-response**, and the healthy provider took a health-counting failure that could open its breaker. An empty `data:\n\n` frame did the same. Fixed with an explicit `IsCommentEvent` flag plus an empty-payload guard before the parse.
+
+**6. A billed failure charged the tenant nothing.** The failure path called `Budget.Release()`, freeing the whole hold, on the documented assumption that a failed request is free. But a `5xx` after generation began *is* billed, and the ledger recorded that cost — so the ledger showed spend the budget never saw, and a tenant could burn unlimited budget through a failing upstream and never be rejected. `Budget.Charge()` existed for exactly this case and was never called from the request path. Fixed by committing the cost the ledger actually attributed (`Commit(0)` is still a full release when nothing was billed).
+
+**7. Anthropic responses claimed to be from 1970.** Anthropic's Messages API returns no creation timestamp, but OpenAI's schema has a required `created` field that clients render as the completion time. Both the streaming and non-streaming translations left it at the zero value, so every Anthropic-served response emitted `"created":0`. Fixed by stamping the adapter's injected clock once per response.
+
+**8. The mock provider ignored `max_tokens`, which slandered the estimator.** The mock generated its configured reply length regardless of the client's cap. A real provider cannot exceed `max_tokens` — it stops and reports `finish_reason: "length"`. Because the benchmark sent `max_tokens: 32` and the mock emitted 48, the reconciliation showed the gateway's estimated rows *under*-counting, and an earlier version of this README repeated that as a finding about the estimator. The instrument was wrong, not the estimator: with the cap honoured, the same reconciliation shows **zero** token and cost mismatches. This is the most instructive bug in the list — a measurement rig that lies makes the thing it measures look broken.
+
+**9. A tool-call stream was silently discarded.** The streaming sink decided "is this content?" by testing `delta.content` text only. A tool-call response carries its entire payload in `delta.tool_calls` with **no** text, so nothing ever met the bar, the response never started, and the client received only `data: [DONE]`. The same gate dropped `finish_reason` and usage frames from an empty-completion stream. Fixed with an explicit predicate covering text, tool calls, finish reason and usage — while still excluding the role-only opening frame, since keeping that out is what holds the transparent-failover window open.
+
+**10. A truncated Anthropic stream was served as complete.** The same class of bug as #1, in the other adapter: Anthropic terminates with `message_stop`, and EOF without it means the response was cut short — but the translator emitted a clean `Done`. Fixed to surface a failure carrying the usage accumulated so far.
+
+**11. A client disconnect was blamed on the provider.** When the gateway's own context was cancelled mid-stream (client gone, or request deadline), the read error was classified `upstream_5xx` — a health-counting failure. So every client that hung up mid-response pushed a *healthy* provider toward an open breaker. Fixed by checking `ctx.Err()` first and classifying as `cancelled`, which by design does not count against health.
+
+**12. A streaming client could not see which provider served it.** The streaming path set none of the `X-Llmgw-*` attempt headers, because they must be written before the response is committed — which happens mid-attempt, before the router returns. Fixed with a small `ProgressSink` interface: the router publishes each target before attempting it, so the sink can stamp the provider, model and attempt count at the moment it commits.
+
 ## Controls and honesty checks
 
 - **The reconciliation has no tolerance parameter, anywhere.** A one-picodollar or one-token disagreement is a mismatch. Every reconciliation that quietly passes in production does so because someone added an epsilon; after that it tests nothing.
 - **Estimated cost is a first-class, separately-counted fact.** A total that mixes measured and estimated numbers is not a bill. The ledger records the source per row, the metrics split measured vs estimated cost into two counters, and the reconciliation refuses to count an estimated row as an exact match.
-- **The SSE codec is fuzzed.** 8M+ executions with no crashers; the round-trip property (encode→decode is lossless, and a payload can never forge a frame boundary) is the one where a bug silently corrupts every streamed response.
+- **The SSE codec is fuzzed.** The round-trip property (encode→decode is lossless, and a payload can never forge a frame boundary) is the one where a bug silently corrupts every streamed response. `make fuzz` runs 30 s (~5M executions on this machine) and CI runs 20 s on every push; longer ad-hoc runs have also found nothing. No crasher has ever been produced, so there is no committed seed corpus.
 - **Two must-not-happen properties are asserted, not hoped for:** a `bad_request` flood does not trip the breaker (multi-tenant isolation), and a mid-stream failure never fails over (the second provider is asserted un-called).
 
 ## Honest limitations
@@ -166,6 +189,7 @@ Each was found by distrusting something that looked fine, and each is now pinned
 3. **Per-provider breaker tuning is coarse.** The breaker registry shares one base config across instances; the per-provider `breaker` block in the config is parsed and validated but not yet applied per instance. The wiring point is marked in `cmd/gateway`.
 4. **Streaming responses are not written into the cache.** A streamed answer is cached via its non-streaming twin (the cache key excludes the stream flag), so a later non-streaming request populates the cache and a later streaming request replays it — but a purely-streaming workload never populates it. Documented in the code rather than silently doing nothing.
 5. **The real OpenAI/Anthropic adapters are unit-tested against `httptest`, not live.** The Anthropic translation (system hoisting, `max_tokens` default, event-typed stream, split-usage accumulation) is covered by a table of event sequences → expected chunks, but no test hits a real endpoint — by design, so the suite runs offline.
+6. **All enforcement state is per-process; this is a single-replica gateway.** Budget reservations, the response cache, the circuit breakers and the completion-length priors all live in memory in one process. Run two replicas behind a load balancer and each enforces its own budget, so a tenant's effective limit multiplies by the replica count; the cache hit rate divides by it; and each replica learns provider health independently. Making this horizontally scalable means moving reservations and breaker state to something shared (Redis is the conventional answer, and the reservation protocol here — reserve, commit, expire — was designed to port to it), which is real work that is **not** done. Every headline number above was measured on one replica, where the numbers are honest.
 
 ## Tech stack
 
@@ -245,4 +269,4 @@ llmgw/
 
 ## The claim, stated narrowly
 
-On one laptop against local mock providers: the gateway adds under 2 ms p99 of its own overhead (under 3.4 ms observed from outside) at ~18k req/s; it absorbs a provider outage under 198k requests of load with zero client-visible errors; its cost ledger reconciles exactly against independently-computed provider logs across 204,175 settled rows; and it enforces per-tenant budgets and tenant-isolated caching with the correctness properties above pinned by tests. It does **not** claim real-provider latencies, a production-grade tokenizer, or per-instance breaker tuning — those limits are listed above. The three bugs in "Bugs found" are there because the reconciliation and the mid-stream tests caught them, and I would rather that class of error keep being caught by the harness than by a reader.
+On one laptop against local mock providers: the gateway adds under 2 ms p99 of its own overhead (under 3 ms observed from outside) at ~19.5k req/s; it absorbs a provider outage under 120k requests of load with zero client-visible errors; its cost ledger reconciles against independently-computed provider logs with zero mismatches across 120,901 rows; and it enforces per-tenant budgets and tenant-isolated caching with the correctness properties above pinned by tests. It does **not** claim real-provider latencies, a production-grade tokenizer, or per-instance breaker tuning — those limits are listed above. The bugs in "Bugs found" are there because the reconciliation, the mid-stream tests and an adversarial audit caught them, and I would rather that class of error keep being caught by the harness than by a reader.

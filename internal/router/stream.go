@@ -8,6 +8,16 @@ import (
 	"github.com/harsha-moparthy/llmgw/internal/provider"
 )
 
+// ProgressSink is an optional StreamSink extension: a sink that implements it is
+// told which target each attempt is about to use, before that attempt runs.
+//
+// It exists because the streaming response's headers are committed at the moment
+// the first frame is written — mid-attempt — so a sink that wants to report the
+// serving provider cannot wait for ExecuteStream to return.
+type ProgressSink interface {
+	OnAttempt(provider, model string, attempt int)
+}
+
 // StreamSink is what the server passes to ExecuteStream to receive frames. The
 // router does not know about HTTP or SSE; it hands the caller each chunk and the
 // caller decides how to write it.
@@ -72,6 +82,13 @@ func (r *Router) ExecuteStream(ctx context.Context, tenant string, route *Route,
 		attemptNo := i + 1
 		r.stats.Attempts.Add(1)
 		ar.Attempts = attemptNo
+		// Publish the target BEFORE the attempt runs. The streaming sink stamps
+		// response headers at the moment the first frame is written, which happens
+		// mid-attempt, so it needs to know which provider is serving before the
+		// attempt returns.
+		if p, ok := sink.(ProgressSink); ok {
+			p.OnAttempt(t.Provider.Name(), t.Model, attemptNo)
+		}
 
 		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
 		attemptCtx = provider.WithAttempt(attemptCtx, attemptNo)

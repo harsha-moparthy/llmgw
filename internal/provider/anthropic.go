@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -197,7 +198,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *apiv1.ChatRequest, mo
 		return nil, &Failure{Class: ClassUpstream5xx, Provider: p.name, Model: model, Err: fmt.Errorf("decoding response: %w", err)}
 	}
 	return &Result{
-		Response:         ar.toOpenAI(model),
+		Response:         ar.toOpenAI(model, p.now().Unix()),
 		Usage:            ar.usage(),
 		UsageIsEstimated: false,
 		UpstreamLatency:  p.now().Sub(start),
@@ -227,7 +228,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req *apiv1.ChatReque
 		_ = resp.Body.Close()
 		return nil, f
 	}
-	return newAnthropicStream(ctx, p.name, model, resp), nil
+	return newAnthropicStream(ctx, p.name, model, resp, p.now().Unix()), nil
 }
 
 func (p *AnthropicProvider) transportFailure(ctx context.Context, model string, err error) *Failure {
@@ -303,12 +304,20 @@ func (ar *anthropicResponse) usage() *apiv1.Usage {
 	return u
 }
 
-func (ar *anthropicResponse) toOpenAI(model string) *apiv1.ChatResponse {
+// toOpenAI converts an Anthropic response into OpenAI shape.
+//
+// created must be supplied by the caller: Anthropic's Messages API does not
+// return a creation timestamp, but OpenAI's schema has a required `created`
+// field that clients display as the completion time. Leaving it at the zero
+// value emits "created":0, which every client renders as 1 January 1970 — so the
+// adapter stamps its own clock rather than passing along a plausible-looking lie.
+func (ar *anthropicResponse) toOpenAI(model string, created int64) *apiv1.ChatResponse {
 	finish := mapStopReason(ar.StopReason)
 	return &apiv1.ChatResponse{
-		ID:     ar.ID,
-		Object: apiv1.ObjectChatCompletion,
-		Model:  model,
+		ID:      ar.ID,
+		Object:  apiv1.ObjectChatCompletion,
+		Created: created,
+		Model:   model,
 		Choices: []apiv1.Choice{{
 			Index:        0,
 			Message:      &apiv1.Message{Role: apiv1.RoleAssistant, Content: apiv1.NewTextContent(ar.text())},
@@ -350,15 +359,22 @@ type anthropicStream struct {
 	done   chan struct{}
 
 	id           string
+	created      int64
 	inputTokens  int
 	outputTokens int
 	cachedTokens int
 }
 
-func newAnthropicStream(ctx context.Context, providerName, model string, resp *http.Response) *anthropicStream {
+// newAnthropicStream builds the translating stream. created is the timestamp the
+// emitted OpenAI chunks carry: Anthropic's stream does not supply one, and a zero
+// there renders as 1970 in every client, so the adapter stamps its own clock once
+// at stream start and uses it for every chunk (a single value, so the frames of
+// one response agree with each other and with the non-streaming path).
+func newAnthropicStream(ctx context.Context, providerName, model string, resp *http.Response, created int64) *anthropicStream {
 	s := &anthropicStream{
 		provider: providerName,
 		model:    model,
+		created:  created,
 		body:     resp.Body,
 		dec:      sse.NewDecoder(resp.Body),
 		events:   make(chan StreamEvent, 16),
@@ -392,7 +408,6 @@ type anthropicEvent struct {
 
 func (s *anthropicStream) run(ctx context.Context) {
 	defer close(s.events)
-	created := int64(0)
 	sentRole := false
 
 	for {
@@ -405,11 +420,17 @@ func (s *anthropicStream) run(ctx context.Context) {
 
 		ev, err := s.dec.Next()
 		if err != nil {
-			if err == io.EOF {
-				// Anthropic terminates with a message_stop event, after which the
-				// body closes. Reaching EOF without having seen the stop is a
-				// truncation.
-				s.emit(StreamEvent{Done: true})
+			if errors.Is(err, io.EOF) {
+				// Anthropic terminates with message_stop, and that case returns from
+				// this loop directly. Reaching EOF here means the stop never arrived,
+				// so the response is TRUNCATED even though the framing was clean —
+				// exactly the OpenAI [DONE] situation. Emitting Done would serve a
+				// half-generated Claude response as a complete one, so it is a
+				// failure carrying the usage accumulated so far.
+				s.emit(StreamEvent{Err: &Failure{
+					Class: ClassTimeout, Provider: s.provider, Model: s.model,
+					Err: io.ErrUnexpectedEOF, UsageAtFailure: s.snapshotUsage(),
+				}})
 				return
 			}
 			class := ClassUpstream5xx
@@ -439,13 +460,13 @@ func (s *anthropicStream) run(ctx context.Context) {
 			}
 			// Emit an OpenAI-style opening chunk carrying the role.
 			if !sentRole {
-				chunk := s.openAIChunk(created, apiv1.RoleAssistant, "", nil)
+				chunk := s.openAIChunk(s.created, apiv1.RoleAssistant, "", nil)
 				s.emitChunk(chunk)
 				sentRole = true
 			}
 		case "content_block_delta":
 			if ae.Delta != nil && ae.Delta.Type == "text_delta" && ae.Delta.Text != "" {
-				chunk := s.openAIChunk(created, "", ae.Delta.Text, nil)
+				chunk := s.openAIChunk(s.created, "", ae.Delta.Text, nil)
 				s.emitChunk(chunk)
 			}
 		case "message_delta":
@@ -455,7 +476,7 @@ func (s *anthropicStream) run(ctx context.Context) {
 			}
 			if ae.Delta != nil && ae.Delta.StopReason != "" {
 				finish := mapStopReason(ae.Delta.StopReason)
-				chunk := s.openAIChunk(created, "", "", &finish)
+				chunk := s.openAIChunk(s.created, "", "", &finish)
 				s.emitChunk(chunk)
 			}
 		case "message_stop":
@@ -463,8 +484,8 @@ func (s *anthropicStream) run(ctx context.Context) {
 			// include_usage behaviour so the gateway's ledger gets real counts.
 			u := s.snapshotUsage()
 			usageChunk := &apiv1.ChatChunk{
-				ID: s.id, Object: apiv1.ObjectChatCompletionChunk, Model: s.model,
-				Choices: []apiv1.Choice{}, Usage: u,
+				ID: s.id, Object: apiv1.ObjectChatCompletionChunk, Created: s.created,
+				Model: s.model, Choices: []apiv1.Choice{}, Usage: u,
 			}
 			b, _ := json.Marshal(usageChunk)
 			s.emit(StreamEvent{Chunk: usageChunk, Raw: b})

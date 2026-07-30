@@ -104,13 +104,22 @@ type Event struct {
 	// ':'), which providers use as a keep-alive. Comment events carry no data
 	// and must not be forwarded as content.
 	Comment string
+	// IsCommentEvent marks the event as a comment/keep-alive. It is a separate
+	// flag rather than being inferred from a non-empty Comment because a bare
+	// ":\n\n" — the cheapest possible keep-alive, and one real providers do send
+	// — has EMPTY comment text. Inferring from the text made such an event look
+	// like neither a comment nor data, and the caller then tried to JSON-parse
+	// nothing and killed the stream mid-response.
+	IsCommentEvent bool
 	// Done is true when Data is exactly the [DONE] sentinel.
 	Done bool
 }
 
 // IsComment reports whether this event was a comment/keep-alive rather than a
 // data-bearing event.
-func (e *Event) IsComment() bool { return e.Comment != "" && len(e.Data) == 0 }
+//
+// It must be true for a bare ":" with no text: see IsCommentEvent.
+func (e *Event) IsComment() bool { return e.IsCommentEvent && len(e.Data) == 0 }
 
 // Decoder reads events from a stream.
 //
@@ -217,7 +226,10 @@ func (d *Decoder) Next() (*Event, error) {
 			// being buffered, because they are not part of any event's field set
 			// and a keep-alive arriving mid-event must not disturb it.
 			if !d.inEvent {
-				return &Event{Comment: string(trimLeadingSpace(line[1:]))}, nil
+				return &Event{
+					Comment:        string(trimLeadingSpace(line[1:])),
+					IsCommentEvent: true,
+				}, nil
 			}
 			continue
 		}
