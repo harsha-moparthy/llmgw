@@ -167,7 +167,10 @@ func (l Limit) SoftThreshold() money.Pico {
 	if l.SoftBasisPoints >= 10000 {
 		return l.Amount
 	}
-	return money.Pico(int64(l.Amount) * int64(l.SoftBasisPoints) / 10000)
+	// Scaled via money.ScaleByBasisPoints: the direct multiply overflows int64
+	// for any budget above ~$922 because a picodollar is 1e-12 USD, which silently
+	// wrapped a $5,000 budget's 80% threshold to $310.
+	return money.ScaleByBasisPoints(l.Amount, l.SoftBasisPoints)
 }
 
 // Validate checks the limit is usable.

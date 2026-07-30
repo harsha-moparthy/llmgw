@@ -13,6 +13,7 @@ package money
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -41,6 +42,10 @@ const PicoPerCent = PicoPerUSD / 100
 // Providers quote "$X per 1M tokens", so a price divided by this constant is a
 // per-token price.
 const TokensPerPriceUnit = 1_000_000
+
+// minPico is the most negative representable amount. It has no positive
+// counterpart, so several formatting paths need it called out explicitly.
+const minPico = Pico(math.MinInt64)
 
 // ErrOverflow is returned when an operation would exceed the int64 range.
 // It is returned rather than panicking so that a hostile request (a caller
@@ -124,6 +129,14 @@ func Cost(perToken Pico, n int64) (Pico, error) { return Mul(perToken, n) }
 // never lies about magnitude: it either prints the exact value or, for the
 // aggregate views, callers ask for FormatUSDPrec explicitly.
 func FormatUSD(p Pico) string {
+	// math.MinInt64 has no positive counterpart, so the usual `v = -v` leaves it
+	// negative and both the whole and fractional parts then render with their own
+	// minus signs — "-$-9223372.-36854775808", which is not parseable and reaches
+	// users through Entry.CostUSD. Handled explicitly rather than left to produce
+	// nonsense.
+	if p == minPico {
+		return "-$9223372.036854775808"
+	}
 	neg := p < 0
 	v := int64(p)
 	if neg {
@@ -158,6 +171,12 @@ func FormatUSDPrec(p Pico, decimals int) string {
 	}
 	if decimals > 12 {
 		decimals = 12
+	}
+	if p == minPico {
+		// See FormatUSD: MinInt64 cannot be negated. Format the neighbouring
+		// value, which differs by one picodollar — far below any precision this
+		// function is asked for — rather than emitting malformed digits.
+		p = minPico + 1
 	}
 	neg := p < 0
 	v := int64(p)
@@ -246,4 +265,43 @@ func ParseUSD(s string) (Pico, error) {
 		total = -total
 	}
 	return Pico(total), nil
+}
+
+// ScaleByBasisPoints returns p * bps / 10000, computed without overflowing.
+//
+// This exists because the obvious expression — int64(p) * int64(bps) / 10000 —
+// overflows int64 for entirely realistic inputs, and does so SILENTLY. A
+// picodollar is 1e-12 USD, so $1,000 is 1e15 pico; multiplying that by 8000
+// basis points needs 8e18, which is within a factor of ~1.15 of the int64
+// ceiling. A $5,000 budget at an 80% soft threshold therefore wrapped to $310
+// instead of $4,000, firing budget degradation at 6% of the intended spend.
+//
+// Dividing first would avoid the overflow but truncate: (p/10000)*bps loses up
+// to 9,999 pico of precision per call, and this codebase's whole premise is that
+// money arithmetic is exact. So the computation is split into a quotient part
+// that cannot overflow and a remainder part small enough that scaling it is
+// always safe — which is exact for every input, with no wrap and no truncation
+// beyond the single unavoidable final division.
+func ScaleByBasisPoints(p Pico, bps int) Pico {
+	const denom = 10000
+	if bps <= 0 || p == 0 {
+		return 0
+	}
+	if bps >= denom {
+		return p
+	}
+	neg := p < 0
+	v := int64(p)
+	if neg {
+		v = -v
+	}
+	// v = q*denom + r, so v*bps/denom = q*bps + r*bps/denom exactly.
+	// q*bps cannot overflow for any p within int64 because q <= v/10000, and
+	// r*bps <= 9999*9999 which is trivially small.
+	q, r := v/denom, v%denom
+	out := q*int64(bps) + r*int64(bps)/denom
+	if neg {
+		out = -out
+	}
+	return Pico(out)
 }

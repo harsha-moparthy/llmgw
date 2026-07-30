@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -465,7 +466,22 @@ func (t Totals) EstimatedShareBasisPoints() int {
 	if t.Cost <= 0 {
 		return 0
 	}
-	return int(int64(t.EstimatedCost) * 10000 / int64(t.Cost))
+	// Computed as a ratio of quotients rather than (Estimated*10000)/Cost: the
+	// direct form overflows int64 once EstimatedCost exceeds ~$922, because a
+	// picodollar is 1e-12 USD and 10000 * 9.22e14 pico passes the int64 ceiling.
+	// It wrapped NEGATIVE, so a ledger with half its cost estimated reported
+	// -4223 basis points — a number an operator would read as "no estimates".
+	// Scaling the numerator down by the same factor as the denominator keeps the
+	// ratio while staying far inside the range.
+	num, den := int64(t.EstimatedCost), int64(t.Cost)
+	for num > (1<<62)/10000 || den > (1<<62)/10000 {
+		num /= 2
+		den /= 2
+		if den == 0 {
+			return 0
+		}
+	}
+	return int(num * 10000 / den)
 }
 
 func (t *Totals) add(e *Entry) {
@@ -484,12 +500,18 @@ func (t *Totals) add(e *Entry) {
 		t.Rejected++
 	}
 	t.Tokens.add(e.Tokens)
-	t.Cost += e.CostPico
+	// Saturating rather than wrapping. An unchecked += wraps NEGATIVE once the
+	// running total passes ~$9.22M (a picodollar is 1e-12 USD, so int64 tops out
+	// there), which silently corrupts every rollup and the /metrics endpoint. A
+	// negative lifetime cost reads as a refund; a total pinned at the maximum
+	// reads as "we have exceeded what this type can represent", which is the
+	// truth and is not mistakable for a real figure.
+	t.Cost = addSaturating(t.Cost, e.CostPico)
 	if e.UsageSource == SourceEstimated {
-		t.EstimatedCost += e.CostPico
+		t.EstimatedCost = addSaturating(t.EstimatedCost, e.CostPico)
 		t.EstimatedEntries++
 	} else {
-		t.ReportedCost += e.CostPico
+		t.ReportedCost = addSaturating(t.ReportedCost, e.CostPico)
 	}
 	if t.FirstAt.IsZero() || e.RecordedAt.Before(t.FirstAt) {
 		t.FirstAt = e.RecordedAt
@@ -956,4 +978,22 @@ func (g *requestGuard) observe(e *Entry) string {
 		st.served = true
 	}
 	return detail
+}
+
+// addSaturating adds two picodollar amounts, clamping at the int64 bounds instead
+// of wrapping.
+//
+// Wrapping is the dangerous failure here: it turns a very large positive total
+// into a negative one, and a negative cost total is not obviously broken — it
+// looks like a credit. Clamping produces a value that is wrong in an obvious
+// direction and cannot be mistaken for a plausible invoice.
+func addSaturating(a, b money.Pico) money.Pico {
+	sum, err := money.Add(a, b)
+	if err == nil {
+		return sum
+	}
+	if b > 0 {
+		return money.Pico(math.MaxInt64)
+	}
+	return money.Pico(math.MinInt64)
 }

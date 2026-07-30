@@ -669,3 +669,57 @@ func BenchmarkFormatUSD(b *testing.B) {
 		_ = FormatUSD(1_123_456_789_012)
 	}
 }
+
+// TestScaleByBasisPointsNoOverflow pins the overflow class that an audit found
+// silently breaking budget degradation. A picodollar is 1e-12 USD, so the obvious
+// `amount * bps / 10000` wraps int64 for any amount above roughly $922 — and it
+// wrapped NEGATIVE, so a $5,000 budget's 80% soft threshold computed as $310.65
+// and degradation fired at 6% of the intended spend.
+func TestScaleByBasisPointsNoOverflow(t *testing.T) {
+	for _, usd := range []int64{1, 100, 922, 1000, 5000, 100_000, 9_000_000} {
+		amount := USD(usd)
+		got := ScaleByBasisPoints(amount, 8000)
+		want := USD(usd) / 10000 * 8000 // exact for whole-dollar inputs
+		if got != want {
+			t.Errorf("ScaleByBasisPoints($%d, 8000) = %s, want %s",
+				usd, FormatUSD(got), FormatUSD(want))
+		}
+		if got < 0 {
+			t.Errorf("ScaleByBasisPoints($%d, 8000) went NEGATIVE (%d): int64 wrap", usd, int64(got))
+		}
+	}
+	// Boundary behaviours.
+	if got := ScaleByBasisPoints(USD(10), 0); got != 0 {
+		t.Errorf("0 bps should scale to 0, got %s", FormatUSD(got))
+	}
+	if got := ScaleByBasisPoints(USD(10), 10000); got != USD(10) {
+		t.Errorf("10000 bps should be the identity, got %s", FormatUSD(got))
+	}
+	// Exactness: no truncation beyond the single final division. 10000 pico at
+	// 3333 bps is exactly 3333 pico.
+	if got := ScaleByBasisPoints(Pico(10000), 3333); got != Pico(3333) {
+		t.Errorf("ScaleByBasisPoints(10000 pico, 3333) = %d, want 3333 (precision lost)", int64(got))
+	}
+	// Negatives scale symmetrically.
+	if got := ScaleByBasisPoints(USD(-1000), 5000); got != USD(-500) {
+		t.Errorf("negative scaling = %s, want %s", FormatUSD(got), FormatUSD(USD(-500)))
+	}
+}
+
+// TestFormatMinInt64IsWellFormed pins a formatting bug an audit found: the usual
+// `v = -v` leaves math.MinInt64 negative, so both the whole and fractional parts
+// rendered with their own minus signs — "-$-9223372.-36854775808". That value
+// reaches users through Entry.CostUSD.
+func TestFormatMinInt64IsWellFormed(t *testing.T) {
+	got := FormatUSD(minPico)
+	if strings.Count(got, "-") != 1 {
+		t.Errorf("FormatUSD(MinInt64) = %q: exactly one minus sign expected, digits must not carry their own", got)
+	}
+	if strings.Contains(got, ".-") || strings.Contains(got, "$-") {
+		t.Errorf("FormatUSD(MinInt64) = %q: malformed sign placement", got)
+	}
+	prec := FormatUSDPrec(minPico, 2)
+	if strings.Count(prec, "-") != 1 || strings.Contains(prec, ".-") {
+		t.Errorf("FormatUSDPrec(MinInt64, 2) = %q: malformed", prec)
+	}
+}
