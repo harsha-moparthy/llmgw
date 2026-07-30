@@ -1,8 +1,10 @@
-# Compiled binaries
+# Compiled binaries. These patterns are anchored to the repo root with a leading
+# slash: bare names would also match the cmd/mockprovider and cmd/gwbench SOURCE
+# directories, which silently excluded them from the first commit.
 /bin/
-llmgw
-mockprovider
-gwbench
+/llmgw
+/mockprovider
+/gwbench
 
 # Go build/test artifacts
 *.test
